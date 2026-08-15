@@ -25,6 +25,7 @@ public class ShooterUE : ModuleRules
 
 		PublicIncludePaths.AddRange(new string[] {
 			"ShooterUE",
+			"ShooterUE/Movement",
 			"ShooterUE/Variant_Horror",
 			"ShooterUE/Variant_Horror/UI",
 			"ShooterUE/Variant_Shooter",

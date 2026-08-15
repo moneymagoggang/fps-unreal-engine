@@ -6,8 +6,14 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "InputAction.h"
 #include "InputActionValue.h"
+#include "InputMappingContext.h"
+#include "InputModifiers.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
+#include "Movement/StaminaComponent.h"
 #include "ShooterUE.h"
 
 AShooterUECharacter::AShooterUECharacter()
@@ -42,6 +48,136 @@ AShooterUECharacter::AShooterUECharacter()
 	// Configure character movement
 	GetCharacterMovement()->BrakingDecelerationFalling = 1500.0f;
 	GetCharacterMovement()->AirControl = 0.5f;
+
+	Stamina = CreateDefaultSubobject<UStaminaComponent>(TEXT("Stamina"));
+}
+
+void AShooterUECharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
+	Movement->SetCrouchedHalfHeight(60.0f);
+
+	FirstPersonMeshBaseLocation = FirstPersonMesh->GetRelativeLocation();
+}
+
+void AShooterUECharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (!IsPlayerControlled())
+	{
+		return;
+	}
+
+	if (IsJogging() && GetVelocity().SizeSquared2D() > FMath::Square(BaseWalkSpeed * 1.1f))
+	{
+		Stamina->Drain(JogStaminaDrainRate, DeltaSeconds);
+	}
+
+	UpdateMovementSpeed();
+
+	const float TargetLean = IsJogging() ? 0.0f : LeanInputValue;
+	CurrentLean = FMath::FInterpTo(CurrentLean, TargetLean, DeltaSeconds, LeanInterpSpeed);
+	CurrentCrouchBlend = FMath::FInterpTo(CurrentCrouchBlend, bIsCrouched ? 1.0f : 0.0f, DeltaSeconds, CrouchInterpSpeed);
+
+	const FVector WorldOffset = GetActorRightVector() * (CurrentLean * LeanCameraOffset) - FVector(0.0f, 0.0f, CurrentCrouchBlend * CrouchCameraDrop);
+	const FVector LocalOffset = GetMesh()->GetComponentTransform().InverseTransformVector(WorldOffset);
+	FirstPersonMesh->SetRelativeLocation(FirstPersonMeshBaseLocation + LocalOffset);
+
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		FRotator ControlRotation = PC->GetControlRotation();
+		ControlRotation.Roll = CurrentLean * LeanRollAngle;
+		PC->SetControlRotation(ControlRotation);
+	}
+}
+
+bool AShooterUECharacter::IsJogging() const
+{
+	return bWantsToJog && !bIsCrouched && !Stamina->IsExhausted() && GetCharacterMovement()->IsMovingOnGround();
+}
+
+bool AShooterUECharacter::IsJogAllowed() const
+{
+	return !Stamina->IsExhausted();
+}
+
+void AShooterUECharacter::UpdateMovementSpeed()
+{
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->MaxWalkSpeed = IsJogging() ? JogSpeed : BaseWalkSpeed;
+	Movement->MaxWalkSpeedCrouched = CrouchSpeed;
+	Movement->MaxAcceleration = 1024.0f;
+	Movement->BrakingDecelerationWalking = 1500.0f;
+	Movement->AirControl = 0.1f;
+	Movement->JumpZVelocity = 380.0f;
+}
+
+void AShooterUECharacter::InitHardcoreInput(UEnhancedInputComponent* EnhancedInputComponent)
+{
+	JogAction = NewObject<UInputAction>(this, TEXT("IA_Jog_Runtime"));
+	JogAction->ValueType = EInputActionValueType::Boolean;
+
+	CrouchAction = NewObject<UInputAction>(this, TEXT("IA_Crouch_Runtime"));
+	CrouchAction->ValueType = EInputActionValueType::Boolean;
+
+	LeanAction = NewObject<UInputAction>(this, TEXT("IA_Lean_Runtime"));
+	LeanAction->ValueType = EInputActionValueType::Axis1D;
+
+	HardcoreInputContext = NewObject<UInputMappingContext>(this, TEXT("IMC_Hardcore_Runtime"));
+	HardcoreInputContext->MapKey(JogAction, EKeys::LeftShift);
+	HardcoreInputContext->MapKey(CrouchAction, EKeys::LeftControl);
+	HardcoreInputContext->MapKey(CrouchAction, EKeys::C);
+	HardcoreInputContext->MapKey(LeanAction, EKeys::E);
+	FEnhancedActionKeyMapping& LeanLeftMapping = HardcoreInputContext->MapKey(LeanAction, EKeys::Q);
+	LeanLeftMapping.Modifiers.Add(NewObject<UInputModifierNegate>(this));
+
+	EnhancedInputComponent->BindAction(JogAction, ETriggerEvent::Started, this, &AShooterUECharacter::JogInputStarted);
+	EnhancedInputComponent->BindAction(JogAction, ETriggerEvent::Completed, this, &AShooterUECharacter::JogInputCompleted);
+	EnhancedInputComponent->BindAction(CrouchAction, ETriggerEvent::Started, this, &AShooterUECharacter::CrouchInput);
+	EnhancedInputComponent->BindAction(LeanAction, ETriggerEvent::Triggered, this, &AShooterUECharacter::LeanInput);
+	EnhancedInputComponent->BindAction(LeanAction, ETriggerEvent::Completed, this, &AShooterUECharacter::LeanInput);
+
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (ULocalPlayer* LocalPlayer = PC->GetLocalPlayer())
+		{
+			if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(LocalPlayer))
+			{
+				Subsystem->AddMappingContext(HardcoreInputContext, 1);
+			}
+		}
+	}
+}
+
+void AShooterUECharacter::JogInputStarted()
+{
+	bWantsToJog = true;
+}
+
+void AShooterUECharacter::JogInputCompleted()
+{
+	bWantsToJog = false;
+}
+
+void AShooterUECharacter::CrouchInput()
+{
+	if (bIsCrouched)
+	{
+		UnCrouch();
+	}
+	else
+	{
+		Crouch();
+	}
+}
+
+void AShooterUECharacter::LeanInput(const FInputActionValue& Value)
+{
+	LeanInputValue = FMath::Clamp(Value.Get<float>(), -1.0f, 1.0f);
 }
 
 void AShooterUECharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -59,6 +195,8 @@ void AShooterUECharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 		// Looking/Aiming
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AShooterUECharacter::LookInput);
 		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AShooterUECharacter::LookInput);
+
+		InitHardcoreInput(EnhancedInputComponent);
 	}
 	else
 	{
@@ -109,7 +247,17 @@ void AShooterUECharacter::DoMove(float Right, float Forward)
 
 void AShooterUECharacter::DoJumpStart()
 {
-	// pass Jump to the character
+	if (bIsCrouched)
+	{
+		UnCrouch();
+		return;
+	}
+
+	if (!Stamina->TryConsume(JumpStaminaCost))
+	{
+		return;
+	}
+
 	Jump();
 }
 
